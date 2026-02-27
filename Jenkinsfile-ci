@@ -1,0 +1,117 @@
+@Library('shared-lib') _
+pipeline {
+    agent any
+
+    tools {
+        maven 'maven'
+    }
+
+    environment {
+        SNYK_TOKEN = credentials('SNYK-CRED') // Snyk API token
+    }
+
+    stages {
+            stage('Notify Slack') {
+            steps {
+                echo "Pipeline started."
+                slackNotify(
+                    status: 'STARTED',
+                    color: '#439FE0',
+                    message: 'Pipeline execution has started'
+                )
+            }
+        }
+
+        stage('Checkout') {
+            steps {
+                echo "Cloning Repository..."
+                git branch: 'master',
+                    url: 'https://github.com/airtel-org/DevSecOps.git'
+            }
+        }
+
+        stage('Maven Build') {
+            steps {
+                echo "Building the Maven Project..."
+                sh 'mvn clean package -DskipTests'
+            }
+        }
+                stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('sonarqube') {
+                    echo "Running SonarQube analysis..."
+                    sh '''
+                        mvn sonar:sonar \
+                        -Dsonar.projectKey=spring-boot-mongo \
+                        -Dsonar.projectName="Spring Boot Mongo Project"
+                    '''
+                }
+            }
+        }
+         stage('Snyk Repo Scan') {
+            steps {
+                echo "Running Snyk scan for dependency vulnerabilities..."
+                sh '''
+                    echo "Authenticating with Snyk..."
+                    snyk auth $SNYK_TOKEN
+                    echo "Running Snyk Test..."
+                    snyk test --all-projects || true
+                    snyk monitor --all-projects || true
+                '''
+            }
+        }
+        stage('Build & Tag Docker Image') {
+    steps {
+        script {
+            echo "Building Docker image..."
+            withDockerRegistry(credentialsId: 'dockerhub-cred') {
+                sh 'docker build -t nithiii/spring-mongo-devsecops:1.0.0 .'
+            }
+        }
+    }
+}
+
+stage('Trivy Image Scan') {
+    steps {
+        echo "Scanning Docker image for vulnerabilities using Trivy..."
+        sh '''
+            trivy image --exit-code 0 --severity HIGH,CRITICAL nithiii/spring-mongo-devsecops:1.0.0
+            trivy image --exit-code 1 --severity CRITICAL nithiii/spring-mongo-devsecops:1.0.0 || true
+        '''
+    }
+}
+
+stage('Push Docker Image') {
+    steps {
+        script {
+            echo "Pushing Docker image to DockerHub..."
+            withDockerRegistry(credentialsId: 'dockerhub-cred') {
+                sh 'docker push nithiii/spring-mongo-devsecops:1.0.0'
+            }
+        }
+    }
+}
+
+
+    }
+     post {
+
+        success {
+            echo "Pipeline completed successfully."
+            slackNotify(
+                status: 'SUCCESS',
+                color: 'good',
+                message: 'Pipeline completed successfully'
+            )
+        }
+
+        failure {
+            echo "Pipeline failed. Please check the logs for details."
+            slackNotify(
+                status: 'FAILED',
+                color: 'danger',
+                message: 'Pipeline failed'
+            )
+        }
+    }
+}
